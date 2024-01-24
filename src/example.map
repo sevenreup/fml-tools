@@ -1,0 +1,21 @@
+map "https://fhir-dev.d-tree.org/fhir/StructureMap/utils" = "Utils"
+
+uses "http://hl7.org/fhir/StructureDefinition/QuestionnaireReponse" as source
+uses "http://hl7.org/fhir/StructureDefinition/Bundle" as target
+
+group AddToAppointment(source src: QuestionnaireResponse, source reasonCode: string, source reasonDescription: string, source reasonText: string, target bundle: Bundle) {
+    src->bundle.entry as entry,
+    entry.resource = create("Appointment") as appointment then {
+        src then EvaluateAppointment(src, appointment) "r_appointment_eval";
+        src->appointment.reasonCode = create("CodeableConcept")as codeableConcept then {
+            src->codeableConcept.text = evaluate(reasonText, $this.value) "r_appointment_code_text";
+            src-> codeableConcept.coding = create("Coding") as coding then {
+                // TODO: fix code
+                src->coding.system = "https://d-tree.org",
+                    coding.code = evaluate(reasonCode, $this.value),
+                    coding.display = evaluate(reasonDescription, $this.value) "r_appointment_code_coding_value";
+            } "r_appointment_code_coding";
+        }
+        "r_appointment_code";
+    } "r_appointment_entry";
+}
