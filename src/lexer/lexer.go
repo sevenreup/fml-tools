@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"unicode"
 )
 
@@ -30,11 +31,12 @@ const (
 	LESS_THAN_OR_EQUAL_TO    // <=
 	NOT_EQUAL_TO             // !=
 
-	ASSIGN    // =
-	TRANSFORM // ->
-	COLON     // :
-	COMMA     // ,
-	COMMENT   // // (comment)
+	ASSIGN            // =
+	TRANSFORM         // ->
+	COLON             // :
+	COMMA             // ,
+	COMMENT           // // (comment)
+	MULTILINE_COMMENT // /* (comment)
 
 	OPENING_BRACE // {
 	CLOSING_BRACE // }
@@ -65,11 +67,12 @@ var tokens = []string{
 	LESS_THAN_OR_EQUAL_TO:    "<=",
 	NOT_EQUAL_TO:             "!=",
 
-	ASSIGN:    "=",
-	TRANSFORM: "->",
-	COLON:     ":",
-	COMMA:     ",",
-	COMMENT:   "//",
+	ASSIGN:            "=",
+	TRANSFORM:         "->",
+	COLON:             ":",
+	COMMA:             ",",
+	COMMENT:           "//",
+	MULTILINE_COMMENT: "/*",
 
 	OPENING_BRACE: "{",
 	CLOSING_BRACE: "}",
@@ -152,6 +155,29 @@ func (l *Lexer) ReadTokens() (Position, Token, string) {
 			if nextRune == '/' {
 				l.Next()
 				return l.ReadComment()
+			} else if nextRune == '*' {
+				var builder strings.Builder
+				builder.WriteString("/")
+				for {
+					r, _, err := l.r.ReadRune()
+					if err != nil {
+						if err == io.EOF {
+							return l.pos, EOF, ""
+						}
+						panic(err)
+					}
+					l.pos.Column++
+					if r == '*' {
+						nextRune = l.Peek()
+						if nextRune == '/' {
+							l.Next()
+							break
+						}
+					}
+					builder.WriteString(string(r))
+				}
+				builder.WriteString("*/")
+				return l.pos, MULTILINE_COMMENT, builder.String()
 			}
 			return l.pos, DIV, "/"
 		case '{':

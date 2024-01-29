@@ -20,6 +20,7 @@ type Formatter struct {
 func NewFormatter() *Formatter {
 	return &Formatter{
 		identLevel: 0,
+		tokenIndex: 0,
 	}
 }
 
@@ -40,9 +41,21 @@ func (f *Formatter) Format() {
 	lex := lexer.NewLexer("./src/example.map")
 	defer lex.Close()
 	f.tokens = lex.AccumTokens()
-	newLine := false
 
-	for idx, token := range f.tokens {
+	f.format()
+}
+
+func (f *Formatter) format() {
+	var builder strings.Builder
+	newLine := false
+	for {
+		token, err := f.Token()
+		if err != nil {
+			break
+		}
+		if token.Token == lexer.EOF {
+			break
+		}
 		pos, tok, lit := token.Position, token.Token, token.Literal
 		fmt.Printf("%d:%d\t%s\t%s\n", pos.Line, pos.Column, tok, lit)
 		value := lit
@@ -64,9 +77,8 @@ func (f *Formatter) Format() {
 				f.isStatement = true
 			default:
 				{
-					if idx < len(f.tokens) {
-						nextToken := f.tokens[idx+1]
-
+					nextToken, err := f.PeekToken()
+					if err == nil {
 						for _, symbol := range symbols {
 							if nextToken.Token == symbol {
 								hasSpace = false
@@ -92,9 +104,8 @@ func (f *Formatter) Format() {
 			}
 		case lexer.STRING:
 			{
-				if idx < len(f.tokens) {
-					nextToken := f.tokens[idx+1]
-
+				nextToken, err := f.PeekToken()
+				if err == nil {
 					if nextToken.Token == lexer.SEMI {
 						hasSpace = false
 					}
@@ -118,8 +129,8 @@ func (f *Formatter) Format() {
 					if tok == lexer.COMMA {
 						hasSpace = true
 					} else if tok == lexer.CLOSING_PAREN {
-						found, nextToken := f.GetNextToken(idx)
-						if found {
+						nextToken, err := f.PeekToken()
+						if err == nil {
 							if nextToken.Token == lexer.COMMA {
 								hasSpace = false
 							}
@@ -149,25 +160,29 @@ func (f *Formatter) Format() {
 			builder.WriteString(" ")
 		}
 		f.lastPosition = pos
+		_, err = f.NextToken()
+		if err != nil {
+			break
+		}
 	}
 
 	d1 := []byte(builder.String())
-	err := os.WriteFile("./output/example.map", d1, 0644)
 	if err != nil {
 		panic(err)
 	}
 }
 
-func (f *Formatter) GetNextToken(index int) (bool, lexer.TokenInfo) {
-	if index < len(f.tokens) {
-		return true, f.tokens[index+1]
+// Reader
+func (f *Formatter) Token() (lexer.TokenInfo, error) {
+	if f.tokenIndex < len(f.tokens) {
+		return f.tokens[f.tokenIndex], nil
 	}
 
-	return false, lexer.TokenInfo{}
+	return lexer.TokenInfo{}, fmt.Errorf("no more tokens")
 }
 
 func (f *Formatter) NextToken() (lexer.TokenInfo, error) {
-	if f.tokenIndex < len(f.tokens) {
+	if f.tokenIndex+1 < len(f.tokens) {
 		f.tokenIndex++
 		return f.tokens[f.tokenIndex], nil
 	}
@@ -185,8 +200,9 @@ func (f *Formatter) PreviousToken() (lexer.TokenInfo, error) {
 }
 
 func (f *Formatter) PeekToken() (lexer.TokenInfo, error) {
-	if f.tokenIndex < len(f.tokens) {
-		return f.tokens[f.tokenIndex], nil
+	idx := f.tokenIndex + 1
+	if idx < len(f.tokens) {
+		return f.tokens[idx], nil
 	}
 
 	return lexer.TokenInfo{}, fmt.Errorf("no more tokens")
