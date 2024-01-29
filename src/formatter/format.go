@@ -10,8 +10,11 @@ import (
 
 type Formatter struct {
 	lastPosition lexer.Position
+	tokenIndex   int
 	isGroup      bool
 	identLevel   int
+	isStatement  bool
+	tokens       []lexer.TokenInfo
 }
 
 func NewFormatter() *Formatter {
@@ -36,10 +39,10 @@ func (f *Formatter) Format() {
 	var builder strings.Builder
 	lex := lexer.NewLexer("./src/example.map")
 	defer lex.Close()
-	tokens := lex.AccumTokens()
+	f.tokens = lex.AccumTokens()
 	newLine := false
 
-	for idx, token := range tokens {
+	for idx, token := range f.tokens {
 		pos, tok, lit := token.Position, token.Token, token.Literal
 		fmt.Printf("%d:%d\t%s\t%s\n", pos.Line, pos.Column, tok, lit)
 		value := lit
@@ -57,10 +60,12 @@ func (f *Formatter) Format() {
 			case lexer.IDENT_GROUP:
 				builder.WriteString("\n")
 				f.isGroup = true
+			case lexer.IDENT_THEN:
+				f.isStatement = true
 			default:
 				{
-					if idx < len(tokens) {
-						nextToken := tokens[idx+1]
+					if idx < len(f.tokens) {
+						nextToken := f.tokens[idx+1]
 
 						for _, symbol := range symbols {
 							if nextToken.Token == symbol {
@@ -87,8 +92,8 @@ func (f *Formatter) Format() {
 			}
 		case lexer.STRING:
 			{
-				if idx < len(tokens) {
-					nextToken := tokens[idx+1]
+				if idx < len(f.tokens) {
+					nextToken := f.tokens[idx+1]
 
 					if nextToken.Token == lexer.SEMI {
 						hasSpace = false
@@ -97,11 +102,30 @@ func (f *Formatter) Format() {
 
 				value = fmt.Sprintf("\"%s\"", lit)
 			}
+		case lexer.SEMI:
+			{
+				hasSpace = false
+				f.isStatement = false
+			}
+		case lexer.TRANSFORM:
+			{
+				hasSpace = false
+				f.isStatement = true
+			}
 		default:
 			{
 				if util.Contains(symbols, tok) {
-					if tok == lexer.COMMA || tok == lexer.CLOSING_PAREN {
+					if tok == lexer.COMMA {
 						hasSpace = true
+					} else if tok == lexer.CLOSING_PAREN {
+						found, nextToken := f.GetNextToken(idx)
+						if found {
+							if nextToken.Token == lexer.COMMA {
+								hasSpace = false
+							}
+						} else {
+							hasSpace = true
+						}
 					} else {
 						hasSpace = false
 					}
@@ -111,6 +135,9 @@ func (f *Formatter) Format() {
 
 		if f.identLevel > 0 && newLine {
 			for i := 0; i < f.identLevel; i++ {
+				builder.WriteString("\t")
+			}
+			if f.isStatement {
 				builder.WriteString("\t")
 			}
 			newLine = false
@@ -129,4 +156,38 @@ func (f *Formatter) Format() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func (f *Formatter) GetNextToken(index int) (bool, lexer.TokenInfo) {
+	if index < len(f.tokens) {
+		return true, f.tokens[index+1]
+	}
+
+	return false, lexer.TokenInfo{}
+}
+
+func (f *Formatter) NextToken() (lexer.TokenInfo, error) {
+	if f.tokenIndex < len(f.tokens) {
+		f.tokenIndex++
+		return f.tokens[f.tokenIndex], nil
+	}
+
+	return lexer.TokenInfo{}, fmt.Errorf("no more tokens")
+}
+
+func (f *Formatter) PreviousToken() (lexer.TokenInfo, error) {
+	if f.tokenIndex > 0 {
+		f.tokenIndex--
+		return f.tokens[f.tokenIndex], nil
+	}
+
+	return lexer.TokenInfo{}, fmt.Errorf("no more tokens")
+}
+
+func (f *Formatter) PeekToken() (lexer.TokenInfo, error) {
+	if f.tokenIndex < len(f.tokens) {
+		return f.tokens[f.tokenIndex], nil
+	}
+
+	return lexer.TokenInfo{}, fmt.Errorf("no more tokens")
 }
