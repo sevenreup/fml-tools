@@ -24,11 +24,25 @@ const (
 	MUL // *
 	DIV // /
 
-	ASSIGN // =
+	GREATER_THAN             // >
+	LESS_THAN                // <
+	GREATER_THAN_OR_EQUAL_TO // >=
+	LESS_THAN_OR_EQUAL_TO    // <=
+	NOT_EQUAL_TO             // !=
 
+	ASSIGN    // =
 	TRANSFORM // ->
 	COLON     // :
+	COMMA     // ,
 	COMMENT   // // (comment)
+
+	OPENING_BRACE // {
+	CLOSING_BRACE // }
+	OPENING_PAREN // (
+	CLOSING_PAREN // )
+	FULL_STOP     // .
+
+	QUERY_VARIALBE // $ (query variable)
 )
 
 var tokens = []string{
@@ -45,10 +59,25 @@ var tokens = []string{
 	MUL: "*",
 	DIV: "/",
 
+	GREATER_THAN:             ">",
+	LESS_THAN:                "<",
+	GREATER_THAN_OR_EQUAL_TO: ">=",
+	LESS_THAN_OR_EQUAL_TO:    "<=",
+	NOT_EQUAL_TO:             "!=",
+
 	ASSIGN:    "=",
 	TRANSFORM: "->",
 	COLON:     ":",
+	COMMA:     ",",
 	COMMENT:   "//",
+
+	OPENING_BRACE: "{",
+	CLOSING_BRACE: "}",
+	OPENING_PAREN: "(",
+	CLOSING_PAREN: ")",
+	FULL_STOP:     ".",
+
+	QUERY_VARIALBE: "$",
 }
 
 type Position struct {
@@ -125,11 +154,49 @@ func (l *Lexer) ReadTokens() (Position, Token, string) {
 				return l.ReadComment()
 			}
 			return l.pos, DIV, "/"
+		case '{':
+			return l.pos, OPENING_BRACE, "{"
+		case '}':
+			return l.pos, CLOSING_BRACE, "}"
+		case '(':
+			return l.pos, OPENING_PAREN, "("
+		case ')':
+			return l.pos, CLOSING_PAREN, ")"
+		case '.':
+			return l.pos, FULL_STOP, "."
+		case ',':
+			return l.pos, COMMA, ","
+		case '=':
+			return l.pos, ASSIGN, "="
+		case '$':
+			return l.pos, QUERY_VARIALBE, "$"
+		case '>':
+			nextRune := l.Peek()
+			if nextRune == '=' {
+				l.Next()
+				return l.pos, GREATER_THAN_OR_EQUAL_TO, ">="
+			}
+			return l.pos, GREATER_THAN, ">"
+		case '<':
+			nextRune := l.Peek()
+			if nextRune == '=' {
+				l.Next()
+				return l.pos, LESS_THAN_OR_EQUAL_TO, "<="
+			}
+			return l.pos, LESS_THAN, "<"
+		case '!':
+			nextRune := l.Peek()
+			if nextRune == '=' {
+				l.Next()
+				return l.pos, NOT_EQUAL_TO, "!="
+			}
 		default:
 			if unicode.IsSpace(r) {
 				continue
 			} else if unicode.IsLetter(r) {
 				return l.ReadIdentifier(r)
+			} else if unicode.IsDigit(r) {
+				return l.ReadNumber(r)
 			}
 			return l.pos, STRING, string(r)
 		}
@@ -153,6 +220,7 @@ func (l *Lexer) Peek() rune {
 
 func (l *Lexer) ReadComment() (Position, Token, string) {
 	rawString := ""
+	var newPos Position
 	for {
 		r, _, err := l.r.ReadRune()
 		if err != nil {
@@ -163,13 +231,14 @@ func (l *Lexer) ReadComment() (Position, Token, string) {
 		}
 		l.pos.Column++
 		if r == '\n' {
+			newPos = l.pos
 			l.resetPosition()
 			break
 		} else {
 			rawString += string(r)
 		}
 	}
-	return l.pos, COMMENT, rawString
+	return newPos, COMMENT, rawString
 }
 
 func (l *Lexer) ReadString() (Position, Token, string) {
@@ -192,6 +261,27 @@ func (l *Lexer) ReadString() (Position, Token, string) {
 	return l.pos, STRING, rawString
 }
 
+func (l *Lexer) ReadNumber(current rune) (Position, Token, string) {
+	number := string(current)
+	for {
+		r, _, err := l.r.ReadRune()
+		if err != nil {
+			if err == io.EOF {
+				return l.pos, EOF, ""
+			}
+			panic(err)
+		}
+		l.pos.Column++
+		if unicode.IsDigit(r) {
+			number += string(r)
+		} else {
+			l.r.UnreadRune()
+			break
+		}
+	}
+	return l.pos, INT, number
+}
+
 func (l *Lexer) ReadIdentifier(current rune) (Position, Token, string) {
 	identifier := string(current)
 	for {
@@ -203,7 +293,7 @@ func (l *Lexer) ReadIdentifier(current rune) (Position, Token, string) {
 			panic(err)
 		}
 		l.pos.Column++
-		if unicode.IsDigit(r) || unicode.IsLetter(r) {
+		if validIdentifierSymbol(r) {
 			identifier += string(r)
 		} else {
 			l.r.UnreadRune()
@@ -211,6 +301,10 @@ func (l *Lexer) ReadIdentifier(current rune) (Position, Token, string) {
 		}
 	}
 	return l.pos, IDENT, identifier
+}
+
+func validIdentifierSymbol(symbol rune) bool {
+	return unicode.IsLetter(symbol) || unicode.IsDigit(symbol) || symbol == '_'
 }
 
 func (l *Lexer) resetPosition() {
