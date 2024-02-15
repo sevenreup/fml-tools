@@ -1,21 +1,623 @@
-map "https://fhir-dev.d-tree.org/fhir/StructureMap/utils" = "Utils"
+map "http://fhir-dev.d-tree.org/fhir/StructureMap/patient-demographic-registration" = "Patient Demographic Registration"
 
-uses "http://hl7.org/fhir/StructureDefinition/QuestionnaireReponse" as source
+uses "http://hl7.org/fhir/StructureDefinition/QuestionnaireResponse" as source
 uses "http://hl7.org/fhir/StructureDefinition/Bundle" as target
+uses "http://hl7.org/fhir/StructureDefinition/Encounter" as target
+uses "http://hl7.org/fhir/StructureDefinition/Observation" as target
 
-group AddToAppointment(source src: QuestionnaireResponse, source reasonCode: string, source reasonDescription: string, source reasonText: string, target bundle: Bundle) {
-    src->bundle.entry as entry,
-    entry.resource = create("Appointment") as appointment then {
-        src then EvaluateAppointment(src, appointment) "r_appointment_eval";
-        src->appointment.reasonCode = create("CodeableConcept")as codeableConcept then {
-            src->codeableConcept.text = evaluate(reasonText, $this.value) "r_appointment_code_text";
-            src-> codeableConcept.coding = create("Coding") as coding then {
-                // TODO: fix code
-                src->coding.system = "https://d-tree.org",
-                    coding.code = evaluate(reasonCode, $this.value),
-                    coding.display = evaluate(reasonDescription, $this.value) "r_appointment_code_coding_value";
-            } "r_appointment_code_coding";
-        }
-        "r_appointment_code";
-    } "r_appointment_entry";
+group Main(source src: QuestionnaireResponse, target bundle: Bundle) {
+    src->bundle.id = uuid(),
+        bundle.type = "collection" then ExtractPatient(src, bundle) "r_bundle_data";
 }
+
+group ExtractPatient(source src: QuestionnaireResponse, target bundle: Bundle) {
+    src->bundle.entry as entry, entry.resource = create("Patient")as patient then {
+        src then InitiatePatient(src, patient),ExtractPatientDetails(src, patient),
+            AssignCarePlan(src, patient, bundle) "r_extract_patient";
+    }
+    "r_create_patient";
+}
+
+group InitiatePatient(source src: QuestionnaireResponse, target patient: Patient) {
+    src->patient.id = uuid(),
+        patient.active = true "r_patient_data";
+}
+
+group ExtractPatientDetails(source src: QuestionnaireResponse, target patient: Patient) {
+    src then 
+    ExtractPatientCategory(src, patient),ExtractPersonalInformation(src, patient),
+        ExtractLocationInformation(src, patient),ExtractPhoneInformation(src, patient),
+        ExtractCHWAssigned(src, patient)
+        "r_extract_info";
+}
+
+group ExtractPatientCategory(source src: QuestionnaireResponse, target patient: Patient) {
+    src.item first as page where(linkId = "page-1") then {
+        page.item first as patientCategoryItem where(linkId = "patient-category")->patient.meta = create("Meta") as meta then {
+            src->meta.tag = create("Coding") as coding then {
+                src->coding.system = "https://d-tree.org/fhir/patient-meta-tag",
+                    coding.code = evaluate(patientCategoryItem, $this.answer.value.code),
+                    coding.display = evaluate(patientCategoryItem, $this.answer.value.display)
+                    "r_p_coding";
+            }
+            "r_p_meta_tag";
+        }
+        "r_p_meta";
+    } "r_p_check_page_1";
+}
+
+group ExtractPersonalInformation(source src: QuestionnaireResponse, target patient: Patient) {
+    src.item first as page where(linkId = "page-2") then {
+        src->patient.name = create("HumanName") as patientName then {
+            page.item first as rFirstName where(linkId = "required-first-name")->patientName.given = evaluate(rFirstName, $this.answer.value) "r_p_required_fname";
+            page.item first as oFirstName where(linkId = "optional-first-name" and answer.count() > 0)->patientName.given = evaluate(oFirstName, $this.answer.value) "r_p_required_fname";
+            page.item first as lastName where(linkId = "last-name")->patientName.family = evaluate(lastName, $this.answer.value) "r_p_lname";
+        }
+        "r_p_create_human_name";
+        
+        page.item first as gender where(linkId = "gender")->patient.gender = evaluate(gender, $this.answer.value.code) "r_p_gender";
+
+        src then SetDateOfBirth(src, page, patient) "r_set_dob";
+    }
+    "r_check_page_2";
+}
+
+group SetDateOfBirth(source src: QuestionnaireResponse, source page: QuestionnaireResponseItem, target patient: Patient) {
+    page.item first as dateOfBirthKnown where(linkId = "is-date-of-birth-known") then {
+        dateOfBirthKnown where($this.answer.value = true) then {
+            page.item first as dateOfBirth where(linkId.startsWith("date-of-birth"))->patient.birthDate = evaluate(dateOfBirth, $this.answer.value) "r_p_birth_date";
+        }
+        "r_p_dob_known_true";
+
+        dateOfBirthKnown where($this.answer.value = false) then {
+            src.item first as page1 where(linkId = "page-1") then {
+                page1.item first as patientCategory where(linkId = "patient-category") then {
+                    patientCategory where($this.answer.value.code != "exposed-infant") then ExtractArtClientDateOfBirth(page, patient) "r_calc_dob_exposed_infant";
+                    patientCategory where($this.answer.value.code = "exposed-infant") then ExtractExposedInfantDateOfBirth(page, patient) "r_calc_dob_not_exposed_infant";
+                }
+                "r_page_1_patient_category";
+            }
+            "r_page_1";
+        }
+        "r_p_dob_known_false";
+    }
+    "r_p_check_dob_known";
+}
+
+
+group ExtractExposedInfantDateOfBirth(source page: QuestionnaireResponseItem, target patient: Patient) {
+    page.item first as dob where(linkId = "calculated-dob-for-an-exposed-infant") then {
+            page->patient.birthDate = evaluate(dob, $this.answer.value) "r_set_dob";
+    }
+    "r_p_check_age";
+}
+
+group ExtractArtClientDateOfBirth(source page: QuestionnaireResponseItem, target patient: Patient) {
+    page.item first as age_group where(linkId = "age-for-an-art-client") then {
+        age_group.item as dob where(linkId.startsWith("calculated-dob-for-an-art-client")) then {
+            page->patient.birthDate = evaluate(dob, $this.answer.value) "r_set_dob_calc_from_years_and_months";
+        }
+        "r_get_age_in_years";
+    }
+    "r_check_age_group";
+}
+
+group ExtractLocationInformation(source src: QuestionnaireResponse, target patient: Patient) {
+    src.item first as page where(linkId = "page-3") then {
+        src->patient.address = create("Address")as patientAddress then {
+            page.item first as district where(linkId = "district")->patientAddress.district = evaluate(district, $this.answer.value) "r_p_address_district";
+
+            page.item first as tracingCatchment where(linkId.startsWith("tracing-catchment") and answer.count() > 0) then {
+                src->patientAddress.state = evaluate(tracingCatchment, $this.answer.value) "r_p_address_tracing_catchment";
+
+                page.item first as physicalLocator where(linkId = "physical-locator")->patientAddress.text = evaluate(physicalLocator, $this.answer.value) "r_p_address_text";
+            }
+            "r_check_tracing_catchment";
+
+            src->patientAddress.use = "home" "r_p_address_use";
+            src->patientAddress.type = "physical" "r_p_address_type";
+        }
+        "r_p_address";
+    }
+    "r_check_page_3";
+}
+
+group ExtractPatientPhoneInformation(
+        source src: QuestionnaireResponse,
+        source parent: QuestionnaireItem,
+        target patient: Patient,
+        source linkIdpInfo: string,
+        source linkIdpNumber: String,
+        source linkIdpType: String,
+        source linkIdpOwner: String,
+){
+    parent.item first as info where(linkId = linkIdpInfo) then {
+        info.item first as phoneNumber where($this.linkId.startsWith(linkIdpNumber)) then {
+            info.item first as phoneType where($this.linkId.startsWith(linkIdpType)) then {
+                info.item first as phoneOwner where($this.linkId.startsWith(linkIdpOwner)) then {
+                    src->create("string") as phone then {
+                        src->evaluate(src, phoneNumber.answer.value) as pNumber,
+                                evaluate(src, phoneType.answer.value) as pTtype,
+                                evaluate(src, phoneOwner.answer.value) as pOwner then {
+                                    src->create("string") as systemOther, 
+                                    create("string") as systemPhone then {
+                                        src->systemOther.value = "other" "r_system_other";
+                                        src->systemPhone.value = "phone" "r_system_phone";
+                                        src then
+                                        StorePhoneInformation(src, patient, pNumber, systemPhone),
+                                        StorePhoneInformation(src, patient, pOwner, systemOther),
+                                        StorePhoneInformation(src, patient, pTtype, systemOther) "r_patient_telecom";
+                                    }"r_system";
+                                } "r_phone";
+                    }"r_phone_number";
+                }"r_phone_owner";
+            } "r_phone_type";
+        } "r_phone_info";
+    } "r_info";
+}
+
+
+group ExtractPatientPhoneWithLinkIdNumber(
+    source src: QuestionnaireResponse,
+    source parent: QuestionnaireItem,
+    target patient: Patient,
+    source linkIdNumber: String
+    ){
+    src->create("string") as linkIdpInfo, 
+            create("string") as linkIdpNumber,
+            create("string") as linkIdpType,
+            create("string") as linkIdpOwner then {
+                src->linkIdpInfo.value = evaluate(src, "phone-information-"+linkIdNumber.value) "r_linkIdpInfo";
+                src->linkIdpNumber.value = evaluate(src, "phone-number-value-"+linkIdNumber.value) "r_linkIdpNumber";
+                src->linkIdpType.value = evaluate(src, "phone-number-type-"+linkIdNumber.value) "r_linkIdpType";
+                src->linkIdpOwner.value = evaluate(src, "phone-number-owner-"+linkIdNumber.value) "r_linkIdpOwner";
+                src then ExtractPatientPhoneInformation(
+                    src,
+                    parent,
+                    patient,
+                    linkIdpInfo,
+                    linkIdpNumber,
+                    linkIdpType,
+                    linkIdpOwner
+                ) "r_phone_information";
+    } "r_create_linkIdp";
+}
+
+/*
+We could not save phone number, owner and type in one value, instead we are saving 3 values to the telecom property and accessing them using indices. 
+Below is the sample output
+"telecom": [
+        {
+            "system": "phone",
+            "value": "088983737"
+        },
+        {
+            "system": "other",
+            "value": "Mother"
+        },
+        {
+            "system": "other",
+            "value": "Other"
+        }
+    ]
+To access information about phone 1, we are using patient.telecom[0].value, patient.telecom[1].value and patient.telecom[2].value
+The next phone number, will be the next three values and so on.
+*/
+group ExtractPhoneInformation(source src: QuestionnaireResponse, target patient: Patient) {
+    src.item first as parent where(linkId = "page-4") then {
+        src->create("string") as one,
+                create("string") as two then {
+                    src->one.value = "1" "r_one";
+                    src->two.value = "2" "r_two";
+                    src then
+                    ExtractPatientPhoneWithLinkIdNumber(src, parent, patient, one),
+                    ExtractPatientPhoneWithLinkIdNumber(src, parent, patient, two) "r_phone_information";
+                } "r_create";
+    }"r_page_4";
+}
+
+
+group StorePhoneInformation(
+    source src: QuestionnaireResponse, 
+    target patient: Patient,
+    source value: String,  
+    source system: String
+    ) {
+    src->patient.telecom = create("ContactPoint") as patientContact then {
+             src->patientContact.value = value "r_p_contact_value";
+            src->patientContact.system = system "r_p_contact_system"; 
+    }
+    "r_p_telecom";
+}
+
+group ExtractCHWAssigned(source src: QuestionnaireResponse, target patient: Patient) {
+    src.item first as page where(linkId = "page-5") then {
+        page.item first as practitioner where(linkId = "chw-assigned")->patient.generalPractitioner = create("Reference") as reference then {
+            src->reference.reference = evaluate(practitioner, $this.answer.value.reference) "r_p_practitioner_reference_reference";
+            src->reference.display = evaluate(practitioner, $this.answer.value.display) "r_p_practitioner_reference_reference";
+        }
+        "r_check_practitioner";
+    }
+    "r_check_page_5";
+}
+
+// ---------------------------------------------------------------------
+
+group AssignCarePlan(source src: QuestionnaireResponse, source patient: Patient, target bundle: Bundle) {
+    src->create("string") as title then {
+        patient where($this.meta.tag[0].code = "exposed-infant") then {
+            src->title.value = "Exposed Infant Visit 1" then CreateCarePlan(src, patient, bundle, title) "r_create_care_plan_exposed_infant";
+        }
+        "r_check_code_exposed_infant";
+
+        patient where($this.meta.tag[0].code = "newly-diagnosed-client") then {
+            src->title.value = "Newly Diagnosed Client Visit 1" then CreateCarePlan(src, patient, bundle, title) "r_create_care_plan_newly_diagnosed_client";
+        }
+        "r_check_code_newly_diagnosed_client";
+        
+        patient where($this.meta.tag[0].code = "client-already-on-art") then {
+            src->title.value = "Client Already On ART Visit 1" then CreateCarePlan(src, patient, bundle, title) "r_create_care_plan_client_already_on_art";
+        }
+        "r_check_code_client_already_on_art";
+    }
+    "r_create_care_plan_title_string";
+}
+
+group CreateCarePlan(source src: QuestionnaireResponse, source patient: Patient, target bundle: Bundle, target title: string) {
+    src->bundle.entry as entry,
+    entry.resource = create("CarePlan")as carePlan then {
+        src->carePlan.id = uuid() as carePlanId,
+            carePlan.title = evaluate(title, $this.value),
+            carePlan.status = "active",
+            carePlan.intent = "plan",
+            carePlan.created = evaluate(src, now()) then {
+                src->carePlan.identifier = create("Identifier")as carePlanIdentifier then {
+                    src->carePlanIdentifier.value = carePlanId "r_cp_identifier_value";
+                    src->carePlanIdentifier.use = "official" "r_cp_identifier_use";
+                }
+                "r_cp_identifier";
+            }
+            "r_cp_data";
+
+        src->carePlan.subject = create("Reference")as carePlanSubject then {
+            src->carePlanSubject.reference = evaluate(patient, "Patient/" + $this.id) "r_cp_subject_reference";
+            src->carePlanSubject.display = evaluate(patient, $this.name.given + " " + $this.name.family) "r_cp_subject_display";
+        }
+        "r_cp_title";
+
+        src->carePlan.period = create("Period")as carePlanPeriod then {
+            src->evaluate(src, now()) as current_date_time,
+                carePlanPeriod.start = current_date_time,
+                carePlanPeriod.end = evaluate(current_date_time, $this + ("7 days").toQuantity()) "r_cp_period";
+        }
+        "r_cp_period";
+
+        src.item first as page where(linkId = "page-5") then {
+            page.item first as practitioner where(linkId = "chw-assigned")->carePlan.author = create("Reference") as carePlanAuthor then {
+                src->carePlanAuthor.reference = evaluate(practitioner, $this.answer.value.reference) "r_p_practitioner_reference_reference";
+                src->carePlanAuthor.display = evaluate(practitioner, $this.answer.value.display) "r_p_practitioner_reference_display";
+            } "r_check_practitioner";
+        } "r_check_page_5";
+
+        src then AssignCarePlanActivities(src, patient, title, carePlan, bundle)"r_add_act_ndc";
+    }
+    "r_cp";
+}
+
+group AssignCarePlanActivities(source src: QuestionnaireResponse, source patient: Patient, source title: string, target carePlan: CarePlan, target bundle: Bundle) {
+title.value where($this = "Exposed Infant Visit 1") then AddExposedInfantCarePlanActivities(src, patient, bundle, carePlan) "r_assign_exposed_infant_activities";
+title.value where($this = "Newly Diagnosed Client Visit 1") then AddNewlyDiagnosedClientCarePlanActivities(src, patient, bundle, carePlan) "r_assign_newly_diagnosed_client_activities";
+title.value where($this = "Client Already On ART Visit 1") then AddClientAlreadyOnARTCarePlanActivities(src, patient, bundle, carePlan) "r_assign_client_already_on_art_activities";
+}
+
+group AddExposedInfantCarePlanActivities(source src: QuestionnaireResponse, source patient: Patient, target bundle: Bundle, target carePlan: CarePlan) {
+    src->create("string") as taskDescription, create("string") as taskQuestionnaireId, create("string") as order, create("string") as visitType then {
+        src->taskDescription.value = "Clinical Registration", taskQuestionnaireId.value = "exposed-infant-clinical-registration", order.value = "clinic-visit-task-order-6", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_5";
+        src->taskDescription.value = "Milestone HIV Test", taskQuestionnaireId.value = "exposed-infant-milestone-hiv-test", order.value = "clinic-visit-task-order-7", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_7";
+        src->taskDescription.value = "Vitals", order.value = "clinic-visit-task-order-5", visitType.value = "client-visit" then PerformVitalsScreening(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_4";
+        src->taskDescription.value = "TB/COVID Screening", taskQuestionnaireId.value = "patient-tb-covid", order.value = "clinic-visit-task-order-2", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_task_tb_covid";
+        src->taskDescription.value = "Counselling", taskQuestionnaireId.value = "exposed-infant-counselling",  order.value = "clinic-visit-task-order-8", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_7";
+        src->taskDescription.value = "Guardian Registration", order.value = "clinic-visit-task-order-4", visitType.value = "guardian-visit" then AddGuardianRegistration(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_3";
+        src->taskDescription.value = "Medicine", taskQuestionnaireId.value = "exposed-infant-medicine", order.value = "clinic-visit-task-order-9", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_8";
+    }
+    "r_ndc_act_add_acts";
+}
+
+group AddNewlyDiagnosedClientCarePlanActivities(source src: QuestionnaireResponse, source patient: Patient, target bundle: Bundle, target carePlan: CarePlan) {
+    src->create("string") as taskDescription, create("string") as taskQuestionnaireId, create("string") as order, create("string") as visitType then {
+        src->taskDescription.value = "TB/COVID Screening", taskQuestionnaireId.value = "patient-tb-covid", order.value = "clinic-visit-task-order-2", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_task_tb_covid";
+        src->taskDescription.value = "Guardian Registration", order.value = "clinic-visit-task-order-4", visitType.value = "guardian-visit" then AddGuardianRegistration(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_3";
+        src->taskDescription.value = "Vitals", order.value = "clinic-visit-task-order-5", visitType.value = "client-visit" then PerformVitalsScreening(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_4";
+        src->taskDescription.value = "Index Case Testing", taskQuestionnaireId.value = "art-client-index-case-testing", order.value = "clinic-visit-task-order-8", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_5";
+        src->taskDescription.value = "Welcome Service", taskQuestionnaireId.value = "art-client-welcome-service-newly-diagnosed", order.value = "clinic-visit-task-order-11", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_6";
+        src->taskDescription.value = "Record Art Number", taskQuestionnaireId.value = "art-client-art-number", order.value = "clinic-visit-task-order-14", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_7";
+        src->taskDescription.value = "Clinical Stage and CD4", taskQuestionnaireId.value = "art-client-clinical-stage-and-cd4", order.value = "clinic-visit-task-order-15", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_8";
+        src->taskDescription.value = "TB History and Regimen", taskQuestionnaireId.value = "art-client-tb-history-and-regimen", order.value = "clinic-visit-task-order-16", visitType.value = "guardian-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_9";
+    } "r_ndc_act_add_acts";
+    src->create("string") as reasonCode,
+            create("string") as reasonDisplay,
+            create("string") as reasonText,
+            create("string") as questionnaireId then
+            {
+            src->reasonCode.value = "linkage", reasonDisplay.value = "Linkage", reasonText.value = "Linkage",
+                questionnaireId.value = "art-tracing-outcome" then AddLinkageCarePlanActivity(src, reasonCode, reasonDisplay, reasonText, bundle, carePlan, questionnaireId) "r_ndc_tracing_draft";
+            } "r_tracing_with_linkage";
+}
+
+group AddClientAlreadyOnARTCarePlanActivities(source src: QuestionnaireResponse, source patient: Patient, target bundle: Bundle, target carePlan: CarePlan) {
+    src->create("string") as taskDescription, create("string") as taskQuestionnaireId, create("string") as order, create("string") as visitType then {
+        src->taskDescription.value = "Clinical Registration", taskQuestionnaireId.value = "art-client-clinical-registration", order.value = "clinic-visit-task-order-1", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_5";
+        src->taskDescription.value = "Viral Load Collection", taskQuestionnaireId.value = "art-client-viral-load-collection", order.value = "clinic-visit-task-order-2", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_task_tb_covid";
+        src->taskDescription.value = "TB/COVID Screening", taskQuestionnaireId.value = "patient-tb-covid", order.value = "clinic-visit-task-order-3", visitType.value = "client-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_task_tb_covid";
+        src->taskDescription.value = "Vitals", order.value = "clinic-visit-task-order-4", visitType.value = "client-visit" then PerformVitalsScreening(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_4";
+        src->taskDescription.value = "Women's Health Screening", order.value = "clinic-visit-task-order-5", visitType.value = "client-visit" then PerformWomensHealthScreeningScreening(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_4";
+        src->taskDescription.value = "Guardian Registration", order.value = "clinic-visit-task-order-6", visitType.value = "guardian-visit" then AddGuardianRegistration(src, visitType, patient, carePlan, bundle, taskDescription, order) "r_order_value_3";  
+        src->taskDescription.value = "TB History and Regimen", taskQuestionnaireId.value = "art-client-tb-history-and-regimen", order.value = "clinic-visit-task-order-7", visitType.value = "guardian-visit" then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_order_value_9";
+    } "r_ndc_act_add_acts";
+    src->create("string") as reasonCode,
+            create("string") as reasonDisplay,
+            create("string") as reasonText,
+            create("string") as questionnaireId then
+            {
+            src->reasonCode.value = "linkage", reasonDisplay.value = "Linkage", reasonText.value = "Linkage",
+                questionnaireId.value = "art-tracing-outcome" then AddLinkageCarePlanActivity(src, reasonCode, reasonDisplay, reasonText, bundle, carePlan, questionnaireId) "r_ndc_tracing_draft";
+            } "r_tracing_with_linkage";
+}
+
+group AddCarePlanActivity(source src: QuestionnaireResponse, source visitType: string, target carePlan: CarePlan, target bundle: Bundle, target taskDescription: string, target taskQuestionnaireId: string, target order: string) {
+    src->carePlan.activity = create("CarePlan_Activity")as activity then {
+        src->activity.detail = create("CarePlan_ActivityDetail")as detail then {
+            src->detail.kind = "Task",
+                detail.status = "in-progress",
+                detail.description = evaluate(taskDescription, $this.value),
+                detail.code = cc("https://d-tree.org", taskQuestionnaireId, taskDescription),
+                detail.scheduled = evaluate(carePlan, $this.period),
+                detail.performer = evaluate(carePlan, $this.author) "r_act_det_data";
+        }
+        "r_act_det";
+
+        src->create("string") as taskId then {
+            src->taskId.value = uuid() then {
+                src->activity.outcomeReference = create("Reference") as activityOutcomeRef then {
+                    src->activityOutcomeRef.reference = evaluate(taskId, "Task/" + $this.value) "r_act_outcome_reference_ref";
+                    src->activityOutcomeRef.display = evaluate(taskDescription, $this.value) "r_act_outcome_reference_display";
+
+                    src then ExtractTask(src, visitType, carePlan, bundle, taskId, taskDescription, taskQuestionnaireId, order) "r_create_task_uuid";
+                }
+                "r_act_outcome_reference";
+            }
+            "r_set_task_id";
+        }
+        "r_create_task_id";
+    }
+    "r_act";
+}
+
+group AddLinkageCarePlanActivity(source src: QuestionnaireResponse, source reasonCode: string, source reasonDisplay: string, source reasonText: string, target bundle: Bundle, target carePlan: CarePlan, target outcomeQuestionnaireId: string) {
+    // src->create("Period")as schedulePeriod, carePlan.activity = create("CarePlan_Activity")as activity then {
+    //     src->activity.detail = create("CarePlan_ActivityDetail")as detail then {
+    //         src->detail.kind = "Task",
+    //             detail.status = "scheduled",
+    //             detail.description = evaluate(src, reasonText.value),
+    //             detail.code = cc("https://d-tree.org", outcomeQuestionnaireId, reasonDisplay),
+    //             detail.performer = evaluate(src, carePlan.author) "r_act_det_data";
+
+    //         src->schedulePeriod.start = evaluate(src, carePlan.period.end), detail.scheduled = copy(schedulePeriod) "r_act_scheduled_period";
+    //     }
+    //     "r_act_det";
+
+    //     src->create("string") as taskId then {
+    //         src->taskId.value = uuid() then {
+    //             src->activity.outcomeReference = create("Reference") as activityOutcomeRef then {
+    //                 src->activityOutcomeRef.reference = evaluate(src, "Task/" + taskId.value) "r_act_outcome_reference_ref";
+    //                 src->activityOutcomeRef.display = evaluate(src, reasonDisplay.value) "r_act_outcome_reference_display";
+                   // src then ExtractLinkageTracingTask(src, taskId, reasonCode, reasonDisplay, reasonText, schedulePeriod, bundle, carePlan, outcomeQuestionnaireId) "r_create_task_uuid";
+    //             }
+    //             "r_act_outcome_reference";
+    //         }
+    //         "r_set_task_id";
+    //     }
+    //     "r_create_task_id";
+    // } "r_act_linkage";
+}
+
+group ExtractTask(source src: QuestionnaireResponse, source visitType: string, source carePlan: CarePlan, target bundle: Bundle, target taskId: string, target taskDescription: string, target taskQuestionnaireId: string, target order: string) {
+    src->bundle.entry as entry,
+        entry.resource = create("Task") as task then {
+            src-> task.status = "ready",
+                task.intent = "plan",
+                task.priority = "routine",
+                task.description = evaluate(taskDescription, $this.value),
+                task.authoredOn = evaluate(src, now()) as current_date_time,
+                task.lastModified = current_date_time,
+                task.for = evaluate(carePlan, $this.subject),
+                task.executionPeriod = evaluate(carePlan, $this.period),
+                task.requester = evaluate(carePlan, $this.author),
+                task.owner = evaluate(carePlan, $this.author) then {
+                    src->task.identifier = create("Identifier")as taskIdentifier then {
+                        src->taskIdentifier.value = taskId "r_task_identifier_value";
+                        src->taskIdentifier.use = "official" "r_task_identifier_use";
+                    }
+                    "r_task_identifier";
+                }
+                "r_task_data";
+
+            // todo: test the id shortcut
+            src->create("id") as task_id then {
+                src->task_id.value = taskId "r_set_task_id_value";
+                src->task.id = task_id "r_set_task_id";
+            }
+            "r_create_id";
+
+            src->task.meta = create("Meta") as meta then {
+                src->meta.tag = c("https://d-tree.org", order) "r_task_meta_tag";
+
+                visitType where($this.value = "guardian-visit") then {
+                    src->meta.tag = c("https://d-tree.org/fhir/task-filter-tag", visitType) "r_task_meta_tag_guardian_visit";
+                }
+                "r_task_is_part_of_guardian_visit_check";
+            }
+            "r_task_meta";
+
+            src->task.reasonReference = create("Reference")as taskReasonRef then {
+                src->taskReasonRef.reference = evaluate(taskQuestionnaireId, "Questionnaire/" + $this.value) "r_task_reason_reference_ref";
+                src->taskReasonRef.display = evaluate(taskDescription, $this.value) "r_task_reason_reference_display";
+            }
+            "r_task_reason_reference";
+    }
+    "r_create_task";
+}
+
+// -------------------------------------------------------------------------------------------------------------------------------------
+group PerformVitalsScreening(source src: QuestionnaireResponse, source visitType: string,source patient: Patient, target carePlan: CarePlan, target bundle: Bundle, target taskDescription: string, target order: string) {       
+    // get date ranges
+    src->evaluate(src, (today() - ((6 * 30).toString() + " days").toQuantity()))as date_6_months_ago,
+        evaluate(src, (today() - ((15 * 365).toString() + " days").toQuantity()))as date_15_years_ago then {
+
+        patient.birthDate as birthDate -> create("string") as taskQuestionnaireId then {
+            // if patient is male
+            patient where($this.gender = "male") then {
+                src->taskQuestionnaireId.value = evaluate(date_6_months_ago, iif(birthDate >= $this, "patient-vitals-male-0-to-6-months"))"r_vitals_male_0_to_6_months";
+                src->taskQuestionnaireId.value = evaluate(date_15_years_ago, iif(birthDate >= $this and birthDate < date_6_months_ago, "patient-vitals-6-months-to-15-years"))"r_vitals_6_months_to_5_years";
+                src->taskQuestionnaireId.value = evaluate(date_15_years_ago, iif(birthDate < $this, "art-client-vitals-male-15-years-plus"))"r_vitals_male_15_years_plus";
+            }
+            "r_ndc_gender_male";
+
+            // if patient is female
+            patient where($this.gender = "female") then {
+                src->taskQuestionnaireId.value = evaluate(date_6_months_ago, iif(birthDate >= $this, "patient-vitals-female-0-to-6-months"))"r_vitals_female_0_to_6_months";
+                src->taskQuestionnaireId.value = evaluate(date_15_years_ago, iif(birthDate >= $this and birthDate < date_6_months_ago, "patient-vitals-6-months-to-15-years"))"r_vitals_6_months_to_5_years";
+                src->taskQuestionnaireId.value = evaluate(date_15_years_ago, iif(birthDate < $this, "art-client-vitals-female-15-years-plus"))"r_vitals_female_15_years_plus";
+            }
+            "r_ndc_gender_female";
+
+            src then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_add_vitals_activity";
+        }
+        "r_get_birth_date";
+    }
+    "r_ndc_date_ranges";
+}
+
+group PerformWomensHealthScreeningScreening(source src: QuestionnaireResponse, source visitType: string, source patient: Patient, target carePlan: CarePlan, target bundle: Bundle, target taskDescription: string, target order: string) {
+    patient where($this.gender = "female") then {
+        patient.birthDate as birthDate -> create("string") as taskQuestionnaireId then {
+            // get date ranges
+            src->evaluate(src, (today() - ((9 * 365).toString() + " days").toQuantity())) as date_9_years_ago,
+                evaluate(src, (today() - ((14 * 365).toString() + " days").toQuantity())) as date_14_years_ago,
+                evaluate(src, (today() - ((15 * 365).toString() + " days").toQuantity())) as date_15_years_ago,
+                evaluate(src, (today() - ((25 * 365).toString() + " days").toQuantity())) as date_25_years_ago then {
+                    // if patient is between the ages of 9 and 14 or is above the age of 15
+                    birthDate where(($this >= date_14_years_ago and $this <= date_9_years_ago) or ($this <= date_15_years_ago)) then {
+                        // assign questionnaires
+                        src->taskQuestionnaireId.value = evaluate(date_14_years_ago, iif(birthDate >= $this and birthDate <= date_9_years_ago, "Questionnaire/art-client-womens-health-screening-female-9-to-14-years")) "r_whs_9_to_14_years";
+                        src->taskQuestionnaireId.value = evaluate(date_25_years_ago, iif(birthDate >= $this and birthDate <= date_15_years_ago, "Questionnaire/art-client-womens-health-screening-female-15-to-25-years")) "r_whs_15_to_25_years";
+                        src->taskQuestionnaireId.value = evaluate(date_25_years_ago, iif(birthDate < $this, "Questionnaire/art-client-womens-health-screening-female-25-years-plus")) "r_whs_25_years_plus";
+    
+                        src then AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_add_whs-act";
+                    }
+                    "r_check_range";
+                }
+                "r_ndc_date_ranges";
+        }
+        "r_ndc_whs_patient_birth_date";
+    }
+    "r_check_gender";
+}
+
+
+group AddGuardianRegistration(source src: QuestionnaireResponse, source visitType: string, source patient: Patient, target carePlan: CarePlan, target bundle: Bundle, target taskDescription: string, target order: string) {
+    patient.birthDate as birthDate -> create("string") as taskQuestionnaireId, 
+        evaluate(src, (today() - ((15 * 365).toString() + " days").toQuantity()))as date_15_years_ago then {
+            src->taskQuestionnaireId.value = evaluate(date_15_years_ago, iif(birthDate >= $this, "Questionnaire/patient-guardian-registration-0-to-15-years", "Questionnaire/patient-guardian-registration-15-years-plus")) then 
+            AddCarePlanActivity(src, visitType, carePlan, bundle, taskDescription, taskQuestionnaireId, order) "r_guardian_registration_add_activity";
+    }"r_guardian_registration";
+}
+
+// TODO: Either remove this or add a comment explaining why it's here
+group ExtractLinkageTracingTask(source src: QuestionnaireResponse, source taskId: string, source reasonCode: string, source reasonDisplay: string, source reasonText: string, source activityScheduledPeriod: Period, target bundle: Bundle, target carePlan: Careplan, target outcomeQuestionnaireId: string) {
+    src->bundle.entry as entry,
+        entry.resource = create("Task") as task then {
+            src-> task.status = "ready",
+                task.intent = "plan",
+                task.priority = "routine",
+                task.authoredOn = evaluate(src, now()) as current_date_time,
+                task.lastModified = current_date_time
+                "r_task_data";
+
+            src->create("id") as task_id then {
+                            src->task_id.value = taskId "r_set_task_id_value";
+                            src->task.id = task_id "r_set_task_id";
+                        }
+                        "r_create_id";
+
+            src->task.identifier = create("Identifier") as identifier,
+                identifier.use = "official", identifier.value = uuid() "r_task_create_identifier";
+
+            src->task.code = create("CodeableConcept")as taskCode then {
+                            src->taskCode.text = "Contact Tracing" "r_task_code_text";
+                            src-> taskCode.coding = create("Coding") as coding then {
+                                src->coding.system = "http://snomed.info/sct",
+                                    coding.code = "225368008",
+                                    coding.display = "Contact tracing (procedure)" "r_task_code_coding_value";
+                            } "r_task_code_coding";
+                        }
+                        "r_task_code";
+
+            src.item first as page where(linkId = "page-4") then {
+                page.item first where(linkId = "phone-number-available-1" and answer.value = true) then {
+                    src->task.meta = create("Meta") as meta then {
+                        src->meta.tag = create("Coding") as coding then {
+                            src->coding.system = "https://d-tree.org" "r_task_meta_tag_system";
+                            src->coding.code = "phone-tracing" "r_task_meta_tag_code";
+                            src->coding.display = "Phone Tracing" "r_task_meta_tag_display";
+                        } "r_task_meta_tag";
+                    } "r_task_meta";
+                    src->task.description = "HIV Contact Tracing via phone" "r_task_description";
+                } "r_task_phone_tracing";
+
+                page.item first where(linkId = "phone-number-available-1" and answer.value = false) then {
+                    src->task.meta = create("Meta") as meta then {
+                        src->meta.tag = create("Coding") as coding then {
+                            src->coding.system = "https://d-tree.org" "r_task_meta_tag_system";
+                            src->coding.code = "home-tracing" "r_task_meta_tag_code";
+                            src->coding.display = "Home Tracing" "r_task_meta_tag_display";
+                        } "r_task_meta_tag";
+                        src->task.description = "HIV Contact Tracing via home visit" "r_task_description";
+                    } "r_task_meta";
+                } "r_task_home_tracing";
+            } "r_task_tracing_meta";
+
+            src->task.for = evaluate(src, carePlan.subject) "r_task_for";
+
+            src->task.executionPeriod = copy(activityScheduledPeriod) "r_task_scheduled_period";
+
+            src->task.owner = evaluate(src, carePlan.author) "r_task_owner";
+
+            src->task.reasonCode = create("CodeableConcept")as codeableConcept then {
+                src->codeableConcept.text = evaluate(src, reasonText.value) "r_task_resonCode_text";
+                src-> codeableConcept.coding = create("Coding") as coding then {
+                    src->coding.system = "https://d-tree.org",
+                        coding.code = evaluate(src, reasonCode.value),
+                        coding.display = evaluate(src, reasonDisplay.value) "r_task_resonCode_coding_value";
+                } "r_task_resonCode_coding";
+            } "r_item_reason_for_removal_obs_value";
+
+            src->task.reasonReference = create("Reference")as taskReasonRef then {
+                src->taskReasonRef.reference = evaluate(src, "Questionnaire/" + outcomeQuestionnaireId.value) "r_task_reason_reference_ref";
+                src->taskReasonRef.display = evaluate(src, reasonDisplay.value + " outcome") "r_task_reason_reference_display";
+            } "r_task_reason_reference";
+            // src then ExtractLinkageTaskInputs(carePlan, task) "r_task_inputs";
+    } "r_create_task";
+}
+
+// group ExtractLinkageTaskInputs(source carePlan: CarePlan, target task: Task)
+//     {
+//         carePlan.activity as carePlanActivity then {
+//             carePlanActivity.outcomeReference as activityOutcomeRef where (display = "Vitals" or display = "TB History and Regimen") -> task.input = create("BackboneElement") as taskInput then
+//                 {
+//                     activityOutcomeRef -> evaluate(carePlanActivity, $this.detail.code) as detailCode, taskInput.type = copy(detailCode),
+//                                           taskInput.value = copy(activityOutcomeRef) "r_task_input_type_value";
+//                 } "r_task_input";
+//         } "r_task_careplan_activities_inputs";
+//     }
+

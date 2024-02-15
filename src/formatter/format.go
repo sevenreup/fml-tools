@@ -37,8 +37,7 @@ var symbols = []lexer.Token{
 }
 
 func (f *Formatter) Format() {
-	var builder strings.Builder
-	lex := lexer.NewLexer("./src/example.map")
+	lex := lexer.NewLexer("D:\\_Projects\\others\\fhir-lsp\\src\\example.map")
 	defer lex.Close()
 	f.tokens = lex.AccumTokens()
 
@@ -167,6 +166,7 @@ func (f *Formatter) format() {
 	}
 
 	d1 := []byte(builder.String())
+	err := os.WriteFile("D:\\_Projects\\others\\fhir-lsp\\output\\example.map", d1, 0644)
 	if err != nil {
 		panic(err)
 	}
